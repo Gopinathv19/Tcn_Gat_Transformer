@@ -25,7 +25,7 @@ def get_parser():
         '--input_position',default=False,type=ast.literal_eval)
     parser.add_argument(
         '--input_mix',default=False,type=ast.literal_eval)
-    parser.add_argument(
+    parser.add_argument(    
         '--ifGaussian',default=False,type=ast.literal_eval)
     parser.add_argument(
         '--SR',default=True,type=ast.literal_eval)
@@ -53,6 +53,19 @@ def get_parser():
     parser.add_argument('--hidden_size', type=int, default=64, help='The size of LSTM hidden state')
     parser.add_argument('--x_encoder_layers', type=int, default=3, help='Number of transformer block layers for x_encoder')
     parser.add_argument('--x_encoder_head', type=int, default=8, help='Head number of x_encoder')
+    # ===================== TCN ARGUMENTS (ADD THESE) ======================
+    parser.add_argument('--use_tcn', default=False, type=ast.literal_eval,
+                        help='Use TCN instead of LSTM in Temporal_Encoder')
+    parser.add_argument('--tcn_layers', default=3, type=int,
+                        help='Number of TCN residual blocks')
+    parser.add_argument('--tcn_hidden', default=64, type=int,
+                        help='Hidden channel size of TCN')
+    parser.add_argument('--tcn_kernel', default=3, type=int,
+                        help='Temporal convolution kernel size')
+    parser.add_argument('--tcn_dropout', default=0.0, type=float,
+                        help='Dropout inside TCN')
+    # ======================================================================
+
     parser.add_argument(
         '--gpu', default=0,type=int,
         help='gpu id')

@@ -7,7 +7,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from laplace_decoder import *
-from fractions import gcd
+from math import gcd
+from tcn_module import TemporalTCN
+
 
 
 def initialize_weights(modules):
@@ -97,23 +99,60 @@ class Temperal_Encoder(nn.Module):
         self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=self.args.x_encoder_layers)
         self.mlp1 = MLP(self.hidden_size)
         self.mlp = MLP(self.hidden_size)
-        self.lstm = nn.LSTM(input_size=self.hidden_size,
-                          hidden_size=self.hidden_size,
-                          num_layers=1,
-                          bias=True,
-                          batch_first=True,
-                          dropout=0,
-                          bidirectional=False)
-        initialize_weights(self.conv1d.modules())
+        # LSTM removed and replaced with TCN option
+        self.use_tcn = getattr(args, 'use_tcn', False)
+
+        if self.use_tcn:
+            self.tcn = TemporalTCN(
+                in_channels=self.hidden_size,
+                num_layers=getattr(args, 'tcn_layers', 3),
+                hidden_channels=getattr(args, 'tcn_hidden', self.hidden_size),
+                kernel_size=getattr(args, 'tcn_kernel', 3),
+                dropout=getattr(args, 'tcn_dropout', 0.0)
+            )
+        else:
+            self.lstm = nn.LSTM(
+                input_size=self.hidden_size,
+                hidden_size=self.hidden_size,
+                num_layers=1,
+                bias=True,
+                batch_first=True,
+                dropout=0,
+                bidirectional=False
+            )
+
 
     def forward(self, x):
-        self.x_dense=self.conv1d(x).permute(0,2,1) #[N, H, dim]
-        self.x_dense=self.mlp1(self.x_dense) + self.x_dense #[N, H, dim]
-        self.x_dense_in = self.transformer_encoder(self.x_dense) + self.x_dense  #[N, H, D]
-        output, (hn, cn) = self.lstm(self.x_dense_in)
-        self.x_state, cn = hn.squeeze(0), cn.squeeze(0) #[N, D]
-        self.x_endoced=self.mlp(self.x_state) + self.x_state#[N, D]
+        # 1) CNN feature extraction
+        self.x_dense = self.conv1d(x).permute(0, 2, 1)           # [N, H, dim]
+
+        # 2) MLP residual enhancement
+        self.x_dense = self.mlp1(self.x_dense) + self.x_dense    # [N, H, dim]
+
+        # 3) Transformer encoder
+        self.x_dense_in = self.transformer_encoder(self.x_dense) + self.x_dense  # [N, H, D]
+
+        # 4) TCN or LSTM branch
+        if self.use_tcn:
+            # TCN expects [N, C, T]  (channels first)
+            tcn_input = self.x_dense_in.permute(0, 2, 1)          # [N, D, H]
+
+            seq_out, pooled = self.tcn(tcn_input)                # pooled = [N, hidden_size]
+
+            self.x_state = pooled                                # same as LSTM hn
+            cn = torch.zeros_like(self.x_state)                  # dummy cell state (decoder expects it)
+
+            # final MLP residual
+            self.x_endoced = self.mlp(self.x_state) + self.x_state
+
+        else:
+            # Original LSTM path
+            output, (hn, cn) = self.lstm(self.x_dense_in)
+            self.x_state, cn = hn.squeeze(0), cn.squeeze(0)
+            self.x_endoced = self.mlp(self.x_state) + self.x_state
+
         return self.x_endoced, self.x_state, cn
+
 
 
 
