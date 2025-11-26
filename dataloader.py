@@ -90,7 +90,7 @@ class Data_Loader:
     self.obs_len = args.obs_length
     self.pred_len = args.pred_length
     self.tot_len = self.obs_len+self.pred_len
-    self.neighbour_threshold = args.neighbour_threshold
+    self.neighbour_threshold = args.neighbor_thred
 
     #collecting the frame from the segments
 

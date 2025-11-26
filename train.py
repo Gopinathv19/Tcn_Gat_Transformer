@@ -79,6 +79,9 @@ def get_parser():
         '--base_dir',default='.',
         help='Base directory including these scrits.')
     parser.add_argument(
+        '--csv_data_path',default='final_surajpur_proper_reduced_2000.csv',
+        help='Path to the CSV data file containing trajectory data.')
+    parser.add_argument(
         '--save_base_dir',default='./savedata/',
         help='Directory for saving caches and models.')
     parser.add_argument(

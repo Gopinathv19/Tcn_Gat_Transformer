@@ -97,13 +97,9 @@ class MultiHeadGAT(nn.Module):
 
     def forward(self, h, adj_mask):
         head_outs = [head(h, adj_mask) for head in self.heads]  # each [N, head_dim]
-        if self.last_layer:
-            # average heads
-            out = torch.mean(torch.stack(head_outs, dim=0), dim=0)  # [N, head_dim]
-            return out
-        else:
-            out = torch.cat(head_outs, dim=-1)  # [N, out_dim]
-            return out
+        # Always concatenate heads to get out_dim
+        out = torch.cat(head_outs, dim=-1)  # [N, out_dim = num_heads * head_dim]
+        return out
 
 class SpatialGAT(nn.Module):
     def __init__(self, in_dim, hidden_dim, out_dim, num_heads=2, dropout=0.0):
@@ -355,24 +351,16 @@ class GAT_TCN_Transformer(nn.Module):
 
         loss = self.reg_loss((loc, scale), target)
 
-        # Build full predicted trajectory(s) for evaluation (concatenate pre-observation with pred mean)
-        # pre_obs to attach: batch_norm_gt[1:self.obs_len] - original code uses pre_obs from index 1 to obs_len-1
-        pre_obs = batch_norm_gt[1:self.obs_len, :, :2].to(device)  # [obs_len-1, N, 2]
-        # predicted sample: use loc as predicted relative displacements (consistent with prior code)?
-        # In this implementation loc is absolute offsets per-step as model output convention, match to dataset style.
-        # We'll return concatenation of pre_obs + loc (converted if needed)
-        # For simplicity return [pre_obs + loc cumulative] -> cumulative sum across pred axis
-        pred_cumsum = torch.cumsum(loc, dim=0)  # [pred_len, N, 2]
-        # full trajectory: concatenate self.pre_obs (which is pre_obs we built) with pred_cumsum
-        # However pre_obs length differs; to be comparable to original, return two variants:
+        # Build full predicted trajectory(s) for evaluation
+        # The evaluation expects: obs frames [1:obs_len] + pred frames = total 19 frames
+        # obs frames 1 to 7 (7 frames) + pred frames 8-19 (12 frames) = 19 frames
+        pre_obs = batch_norm_gt[1:self.obs_len, :, :2].to(device)  # [obs_len-1, N, 2] = [7, N, 2]
+        pred_cumsum = torch.cumsum(loc, dim=0)  # [pred_len, N, 2] = [12, N, 2]
+        
         full_pre_tra = []
-        # Variant 1: ADE-style: concat last obs + predictions
-        last_obs = batch_norm_gt[self.obs_len - 1:self.obs_len, :, :2].to(device)  # [1, N, 2]
-        full1 = torch.cat([last_obs, pred_cumsum], dim=0)  # [1+pred_len, N, 2]
-        full_pre_tra.append(full1)
-        # Variant 2: full observed history + predictions
-        full2 = torch.cat([batch_norm_gt[:self.obs_len, :, :2].to(device), pred_cumsum], dim=0)  # [obs_len + pred_len, N, 2]
-        full_pre_tra.append(full2)
+        # Concatenate observed trajectory (from frame 1) with predictions
+        full_traj = torch.cat([pre_obs, pred_cumsum], dim=0)  # [7+12, N, 2] = [19, N, 2]
+        full_pre_tra.append(full_traj)
 
         return loss, full_pre_tra
 
