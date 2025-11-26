@@ -67,9 +67,10 @@ def preprocess_gat_raj_data(df_raw:pd.DataFrame , training:bool=True)-> list:
         P_displacement = P_displacement @ R.T
 
         # --- Final Segment Assembly ---
-        all_segments.append({
+      all_segments.append({
                 'agent_id': agent_id,
                 'start_frame': frame_id[start_idx],
+                'coords_abs':segment_coords_abs.copy(),
                 'obs_coords_shifted': P_shifted[:obs_len],      # Input for GAT
                 'obs_displacement': P_displacement[:obs_len],   # Input for TCN
                 'pred_displacement_gt': P_displacement[obs_len:tot_len], # Ground Truth Target
@@ -86,9 +87,9 @@ class Data_Loader:
   def __init__(self,segments:List[Dict[str,Any]],args : Any):
     self.segments = segments
     self.args = args
-    self.obs_len = args.obs_len
-    self.pred_len = args.pred_len
-    self.tot_len = args.total_len
+    self.obs_len = args.obs_length
+    self.pred_len = args.pred_length
+    self.tot_len = self.obs_len+self.pred_len
     self.neighbour_threshold = args.neighbour_threshold
 
     #collecting the frame from the segments
@@ -119,8 +120,8 @@ class Data_Loader:
    nei_lists = torch.zeros((self.obs_len,n,n),dtype=torch.float32)
 
    for i, seg in enumerate(scene_segments):
-    P_shifted = torch.from_numpy(seg['obs_coords_shifted']).float()
-    abs_s[:,i,:] = P_shifted[:t]
+    P_shifted = torch.from_numpy(seg['coords_abs']).float()
+    abs_s[:,i,:] = P_shifted
     last_obs = abs_s[self.obs_len - 1, i, :].clone()  
     norm_s[:, i, :] = abs_s[:, i, :] - last_obs
 

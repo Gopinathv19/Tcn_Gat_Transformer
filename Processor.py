@@ -8,12 +8,22 @@ import time
 import torch.nn as nn
 import matplotlib.pyplot as plt
 import numpy as np
+from dataloader import preprocess_gat_raj_data,Data_Loader
+import pandas as pd
+import os
+
+
+
+
 class Processor():
     def __init__(self, args):
         self.args = args
-        Dataloader = DataLoader_bytrajec2
+        csv_path = os.path.join(self.args.base_dir,self.args.csv_data_path)
+        df_raw = pd.read_csv(csv_path)
+        training_mode=(self.args.phase=="train")
+        segments=preprocess_gat_raj_data(df_raw,training=training_mode)
         self.lr=self.args.learning_rate
-        self.dataloader_gt = Dataloader(args,is_gt=True)
+        self.dataloader_gt = Data_Loader(segments,args)
         model = import_class(args.model)
         self.net = model(args)
         if self.args.phase == "train":
@@ -67,7 +77,7 @@ class Processor():
 
     def set_optimizer(self):
         self.optimizer = torch.optim.Adam(self.net.parameters(),lr=self.lr)
-        self.criterion = nn.MSELoss(reduce=False)
+        self.criterion = nn.MSELoss(reduction='none')
         self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer=self.optimizer,\
         T_max = self.args.num_epochs, eta_min=self.args.eta_min)
 
@@ -113,15 +123,26 @@ class Processor():
               batch_pednum: list, number of peds in each batch"""
         self.net.train()
         loss_epoch=0
-        for batch in range(self.dataloader_gt.trainbatchnums):
+        num_batches = len(self.dataloader_gt)//self.args.batch_size
+        for batch in range(num_batches):
             start = time.time()
-            inputs_gt, batch_split, nei_lists = self.dataloader_gt.get_train_batch(batch,epoch)#batch_split:[batch_size, 2]
-            inputs_gt = tuple([torch.Tensor(i) for i in inputs_gt])
+            batch_abs_gt,batch_norm_gt,nei_lists,nei_num,seq_list_gt,shift_value_gt,batch_split = self.dataloader_gt.get_train_batch()
             if self.args.using_cuda:
-                inputs_gt = tuple([i.cuda() for i in inputs_gt])
-            batch_abs_gt, batch_norm_gt, shift_value_gt, seq_list_gt, nei_num = inputs_gt
-            inputs_fw = batch_abs_gt, batch_norm_gt, nei_lists, nei_num, batch_split  #[H, N, 2], [H, N, 2], [B, H, N, N], [N, H]
+                batch_abs_gt=batch_abs_gt.cuda()
+                batch_norm_gt=batch_norm_gt.cuda()
+                nei_lists=[nei.cuda() for nei in nei_lists]
+                nei_num=nei_num.cuda()
+                seq_list_gt=seq_list_gt.cuda()
+                shift_value_gt=shift_value_gt.cuda()
+
+            inputs_fw=(batch_abs_gt,
+                       batch_norm_gt,
+                       nei_lists,
+                       nei_num,
+                       batch_split)
+
             self.net.zero_grad()
+
             GATraj_loss, full_pre_tra = self.net.forward(inputs_fw, epoch, iftest=False)
             if GATraj_loss == 0:
                 continue
@@ -130,79 +151,135 @@ class Processor():
             torch.nn.utils.clip_grad_norm_(self.net.parameters(), self.args.clip)
             self.optimizer.step()
             end= time.time()
-            if batch%self.args.show_step == 0 and self.args.ifshow_detail:
-                print('train-{}/{} (epoch {}), train_loss = {:.5f}, time/batch = {:.5f}'.\
-                format(batch,self.dataloader_gt.trainbatchnums, epoch,GATraj_loss.item(), end - start))
-        train_loss_epoch = loss_epoch / self.dataloader_gt.trainbatchnums
+                    # Logging
+            if batch % self.args.show_step == 0 and self.args.ifshow_detail:
+              print(
+                f"train-{batch}/{num_batches} (epoch {epoch}), "
+                f"train_loss = {GATraj_loss.item():.5f}, time/batch = {end-start:.5f}"
+              )
 
+        train_loss_epoch = loss_epoch / num_batches
 
         return train_loss_epoch
 
-    def val_epoch(self,epoch):
-        self.net.eval()
-        error_epoch,final_error_epoch, first_erro_epoch = 0,0,0
-        error_epoch_list, final_error_epoch_list, first_erro_epoch_list= [], [], []
-        error_cnt_epoch, final_error_cnt_epoch, first_erro_cnt_epoch = 1e-5,1e-5,1e-5
-
-        for batch in range(self.dataloader_gt.valbatchnums):
-            if batch%100 == 0:
-                print('testing batch',batch,self.dataloader_gt.valbatchnums)
-            inputs_gt, batch_split, nei_lists = self.dataloader_gt.get_val_batch(batch,epoch) #batch_split:[batch_size, 2]
-            inputs_gt = tuple([torch.Tensor(i) for i in inputs_gt])
-            if self.args.using_cuda:
-                inputs_gt=tuple([i.cuda() for i in inputs_gt])
-            batch_abs_gt, batch_norm_gt, shift_value_gt, seq_list_gt, nei_num = inputs_gt
-            inputs_fw = batch_abs_gt, batch_norm_gt, nei_lists, nei_num, batch_split  #[H, N, 2], [H, N, 2], [B, H, N, N], [N, H]
-            GATraj_loss,full_pre_tra= self.net.forward(inputs_fw, epoch, iftest=True)
-            if GATraj_loss == 0:
-                continue
-            for pre_tra in full_pre_tra:
-                error, error_cnt, final_error, final_error_cnt, first_erro,first_erro_cnt = \
-                L2forTest(pre_tra, batch_norm_gt[1:, :, :2],self.args.obs_length)
-                error_epoch_list.append(error)
-                final_error_epoch_list.append(final_error)
-                first_erro_epoch_list.append(first_erro)
-                
-            first_erro_epoch += min(first_erro_epoch_list)
-            final_error_epoch += min(final_error_epoch_list)
-            error_epoch += min(error_epoch_list)
-            error_cnt_epoch += error_cnt
-            final_error_cnt_epoch += final_error_cnt
-            first_erro_cnt_epoch += first_erro_cnt
-            error_epoch_list, final_error_epoch_list, first_erro_epoch_list = [], [], []
-        return error_epoch / error_cnt_epoch, final_error_epoch / final_error_cnt_epoch,first_erro_epoch/ first_erro_cnt_epoch
-
-    def test_epoch(self,epoch):
+    def val_epoch(self, epoch):
         self.net.eval()
         error_epoch, final_error_epoch, first_erro_epoch = 0, 0, 0
-        error_epoch_list, final_error_epoch_list, first_erro_epoch_list = [], [], []
         error_cnt_epoch, final_error_cnt_epoch, first_erro_cnt_epoch = 1e-5, 1e-5, 1e-5
 
-        
-        for batch in range(self.dataloader_gt.testbatchnums):
-            if batch%100 == 0:
-                print('testing batch',batch,self.dataloader_gt.testbatchnums)
-            inputs_gt, batch_split, nei_lists = self.dataloader_gt.get_test_batch(batch,epoch)
-            inputs_gt = tuple([torch.Tensor(i) for i in inputs_gt])
+        batch_count = 0
+        num_val_batches = len(self.dataloader_gt) // self.args.batch_size
+
+        for batch_data in self.dataloader_gt.get_val_batch():
+
+            if batch_count % 100 == 0:
+                print(f"validating batch {batch_count}/{num_val_batches}")
+
+            # Custom loader returns 7 values
+            batch_abs_gt, batch_norm_gt, nei_lists, nei_num, seq_list_gt, shift_value_gt, batch_split = batch_data
+
+            # Move to GPU
             if self.args.using_cuda:
-                inputs_gt = tuple([i.cuda() for i in inputs_gt])
-            batch_abs_gt, batch_norm_gt, shift_value_gt, seq_list_gt, nei_num = inputs_gt
-            inputs_fw = batch_abs_gt, batch_norm_gt, nei_lists, nei_num, batch_split #[H, N, 2], [H, N, 2], [B, H, N, N], [N, H]
-            GATraj_loss,full_pre_tra = self.net.forward(inputs_fw, epoch, iftest=True)
+                batch_abs_gt = batch_abs_gt.cuda()
+                batch_norm_gt = batch_norm_gt.cuda()
+                nei_lists=[nei.cuda() for nei in nei_lists]
+                nei_num = nei_num.cuda()
+                seq_list_gt = seq_list_gt.cuda()
+                shift_value_gt = shift_value_gt.cuda()
+
+            # Model forward
+            inputs_fw = (batch_abs_gt, batch_norm_gt, nei_lists, nei_num, batch_split)
+            GATraj_loss, full_pre_tra = self.net.forward(inputs_fw, epoch, iftest=True)
+
             if GATraj_loss == 0:
                 continue
 
+            # Compute errors for each predicted mode
+            error_list = []
+            first_list = []
+            final_list = []
+
             for pre_tra in full_pre_tra:
-                error, error_cnt, final_error, final_error_cnt, first_erro,first_erro_cnt = \
-                L2forTest(pre_tra, batch_norm_gt[1:, :, :2],self.args.obs_length)
-                error_epoch_list.append(error)
-                final_error_epoch_list.append(final_error)
-                first_erro_epoch_list.append(first_erro)
-            first_erro_epoch += min(first_erro_epoch_list)
-            final_error_epoch += min(final_error_epoch_list)
-            error_epoch += min(error_epoch_list)
+                error, error_cnt, final_error, final_error_cnt, first_erro, first_erro_cnt = \
+                    L2forTest(pre_tra, batch_norm_gt[1:, :, :2], self.args.obs_length)
+
+                error_list.append(error)
+                first_list.append(first_erro)
+                final_list.append(final_error)
+
+            # Use minimum error mode
+            error_epoch += min(error_list)
+            final_error_epoch += min(final_list)
+            first_erro_epoch += min(first_list)
+
             error_cnt_epoch += error_cnt
             final_error_cnt_epoch += final_error_cnt
             first_erro_cnt_epoch += first_erro_cnt
-            error_epoch_list, final_error_epoch_list, first_erro_epoch_list = [], [], []
-        return error_epoch / error_cnt_epoch, final_error_epoch / final_error_cnt_epoch,first_erro_epoch/ first_erro_cnt_epoch
+
+            batch_count += 1
+
+        return (
+            error_epoch / error_cnt_epoch,
+            final_error_epoch / final_error_cnt_epoch,
+            first_erro_epoch / first_erro_cnt_epoch
+        )
+
+
+    def test_epoch(self, epoch):
+        self.net.eval()
+        error_epoch, final_error_epoch, first_erro_epoch = 0, 0, 0
+        error_cnt_epoch, final_error_cnt_epoch, first_erro_cnt_epoch = 1e-5, 1e-5, 1e-5
+
+        batch_count = 0
+        num_test_batches = len(self.dataloader_gt) // self.args.batch_size
+
+        for batch_data in self.dataloader_gt.get_test_batch():
+
+            if batch_count % 100 == 0:
+                print(f"testing batch {batch_count}/{num_test_batches}")
+
+            batch_abs_gt, batch_norm_gt, nei_lists, nei_num, seq_list_gt, shift_value_gt, batch_split = batch_data
+
+            # Move to GPU
+            if self.args.using_cuda:
+                batch_abs_gt = batch_abs_gt.cuda()
+                batch_norm_gt = batch_norm_gt.cuda()
+                nei_lists=[nei.cuda() for nei in nei_lists]
+                nei_num = nei_num.cuda()
+                seq_list_gt = seq_list_gt.cuda()
+                shift_value_gt = shift_value_gt.cuda()
+
+            inputs_fw = (batch_abs_gt, batch_norm_gt, nei_lists, nei_num, batch_split)
+
+            GATraj_loss, full_pre_tra = self.net.forward(inputs_fw, epoch, iftest=True)
+            if GATraj_loss == 0:
+                continue
+
+            error_list = []
+            first_list = []
+            final_list = []
+
+            for pre_tra in full_pre_tra:
+                error, error_cnt, final_error, final_error_cnt, first_erro, first_erro_cnt = \
+                    L2forTest(pre_tra, batch_norm_gt[1:, :, :2], self.args.obs_length)
+
+                error_list.append(error)
+                final_list.append(final_error)
+                first_list.append(first_erro)
+
+            error_epoch += min(error_list)
+            final_error_epoch += min(final_list)
+            first_erro_epoch += min(first_list)
+
+            error_cnt_epoch += error_cnt
+            final_error_cnt_epoch += final_error_cnt
+            first_erro_cnt_epoch += first_erro_cnt
+
+            batch_count += 1
+
+        return (
+            error_epoch / error_cnt_epoch,
+            final_error_epoch / final_error_cnt_epoch,
+            first_erro_epoch / first_erro_cnt_epoch
+        )
+
