@@ -131,7 +131,7 @@ def get_parser():
         '--randomRotate',default=True,type=ast.literal_eval,
         help="=True:random rotation of each trajectory fragment")
     parser.add_argument(
-        '--neighbor_thred',default=10,type=int)
+        '--neighbor_thred',default=1.0,type=float)  
     parser.add_argument(
         '--learning_rate',default=1e-04,type=float)
     parser.add_argument(

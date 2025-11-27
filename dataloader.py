@@ -4,81 +4,131 @@ import random
 from typing import List,Dict,Any,Tuple
 import torch
 
-def preprocess_gat_raj_data(df_raw:pd.DataFrame , training:bool=True)-> list:
-  pred_len = 12
-  obs_len = 8
-  tot_len = pred_len + obs_len
+def preprocess_gat_raj_data(
+        df_raw: pd.DataFrame,
+        training: bool = True,
+        global_scale: float = 10.0,
+        displacement_scale: float = 5.0
+) -> List[Dict[str, Any]]:
+    """
+    Preprocesses trajectory data for the GAT-TCN-Transformer model.
 
-  essential_columns = ['Time','Track ID','x [m]','y [m]']
-  df_cleaned = df_raw[essential_columns].copy()
+    Args:
+        df_raw: Raw dataframe with UTM coordinates.
+        training: Whether to apply random rotation.
+        global_scale: Scale factor to divide global coordinates (meters -> scene units).
+        displacement_scale: Scale for normalizing displacement (velocity).
 
-  column_maping = {'Time':'Frame ID','Track ID':'Agent ID','x [m]':'x','y [m]':'y'}
+    Returns:
+        List of dictionaries, each representing a processed trajectory segment.
+    """
 
-  df_cleaned.rename(columns=column_maping,inplace=True)
-  df_cleaned.sort_values(by=['Frame ID','Agent ID'],inplace=True)
-  df_group_by_frame_id = df_cleaned.groupby('Agent ID')
+    # ------------------------------------------------------------------
+    # 0. GLOBAL UTM NORMALIZATION (CRITICAL)
+    # ------------------------------------------------------------------
+    # Step A: Convert UTM to local 0-based coordinates
+    df_raw['x [m]'] = df_raw['x [m]'] - df_raw['x [m]'].min()
+    df_raw['y [m]'] = df_raw['y [m]'] - df_raw['y [m]'].min()
 
-  all_segments = []
+    # Step B: Scale down large meter values (recommended: /10 or /20)
+    df_raw['x [m]'] = df_raw['x [m]'] / global_scale
+    df_raw['y [m]'] = df_raw['y [m]'] / global_scale
 
-  for agent_id,agent_data in df_group_by_frame_id:
-    frame_id = agent_data['Frame ID'].to_numpy()
-    coords = agent_data[['x','y']].to_numpy()
-    num_frames = len(frame_id)
+    # ------------------------------------------------------------------
+    # 1. RENAME COLUMNS + SORT
+    # ------------------------------------------------------------------
+    needed_cols = ['Time', 'Track ID', 'x [m]', 'y [m]']
+    df_cleaned = df_raw[needed_cols].copy()
 
-    if num_frames < obs_len+1:
-      continue
+    df_cleaned.rename(columns={
+        'Time': 'Frame ID',
+        'Track ID': 'Agent ID',
+        'x [m]': 'x',
+        'y [m]': 'y'
+    }, inplace=True)
 
-    for i in range (num_frames-obs_len):
-      start_idx = i
-      end_idx= i+obs_len
+    df_cleaned.sort_values(by=['Frame ID', 'Agent ID'], inplace=True)
 
-      actual_end_indx = min(i+tot_len,num_frames)
+    # ------------------------------------------------------------------
+    # 2. GROUP BY AGENT
+    # ------------------------------------------------------------------
+    groups = df_cleaned.groupby('Agent ID')
 
-      segment_coords_abs = coords[start_idx:actual_end_indx]
-      segment_frame_ids = frame_id[start_idx:actual_end_indx]
+    obs_len = 8
+    pred_len = 12
+    tot_len = obs_len + pred_len
 
-      if segment_coords_abs.shape[0] < tot_len:
-        padding_needed = tot_len-segment_coords_abs.shape[0]
-        padding = np.zeros((padding_needed,2))
-        segment_coords_abs=np.vstack([segment_coords_abs,padding])
+    all_segments = []
 
-      # in this step we are subtracting the anchor point or the final point with all other points in the coords ok
-      # in this step we have normalized the value , from the anchor point
-      P_obs = segment_coords_abs[obs_len-1,:]
-      P_shifted = segment_coords_abs - P_obs
+    # ------------------------------------------------------------------
+    # 3. PROCESS EACH AGENT INTO TRAJECTORY SEGMENTS
+    # ------------------------------------------------------------------
+    for agent_id, agent_data in groups:
+        frames = agent_data['Frame ID'].to_numpy()
+        coords = agent_data[['x', 'y']].to_numpy()
+        n = len(coords)
 
+        if n < obs_len + 1:
+            continue
 
-      # feature calculation and augumentation
+        # Slide over the agent trajectory
+        for i in range(n - obs_len):
+            start = i
+            end = i + obs_len
+            true_end = min(i + tot_len, n)
 
-      P_displacement = P_shifted[1:,:] - P_shifted[:-1,:]
-      displacement_padding = np.zeros((1,2))
-      P_displacement = np.vstack([displacement_padding,P_displacement])
+            # Extract coordinates for this segment
+            seg_abs = coords[start:true_end]
 
-      # rotation for the shifted possition and the displacement
+            # Pad future frames if needed
+            if seg_abs.shape[0] < tot_len:
+                pad = np.zeros((tot_len - seg_abs.shape[0], 2))
+                seg_abs = np.vstack([seg_abs, pad])
 
-      if training:
-        theta = random.uniform(0,2*np.pi)
-        c,s = np.cos(theta) , np.sin(theta)
-        R = np.array([[c,-s],[s,c]])
+            # ----------------------------------------------------------
+            # 3A. SHIFT (RELATIVE POSITION)  → Stabilizes GAT adjacency
+            # ----------------------------------------------------------
+            P_obs = seg_abs[obs_len - 1]                      # anchor point
+            P_shifted = seg_abs - P_obs                       # relative coords
 
-        #applying the rotation to the both the shifted and to the displacement
+            # ----------------------------------------------------------
+            # 3B. DISPLACEMENT (VELOCITY)
+            # ----------------------------------------------------------
+            disp = P_shifted[1:] - P_shifted[:-1:]
+            disp = np.vstack([np.zeros((1, 2)), disp])         # pad first frame
 
-        P_shifted = P_shifted @ R.T
-        P_displacement = P_displacement @ R.T
+            # ----------------------------------------------------------
+            # 3C. NORMALIZE DISPLACEMENT (IMPORTANT FOR TCN)
+            # ----------------------------------------------------------
+            disp_norm = disp / displacement_scale
 
-        # --- Final Segment Assembly ---
-      all_segments.append({
+            # ----------------------------------------------------------
+            # 3D. DATA AUGMENTATION (RANDOM ROTATION)
+            # ----------------------------------------------------------
+            if training:
+                theta = random.uniform(0, 2 * np.pi)
+                c, s = np.cos(theta), np.sin(theta)
+                R = np.array([[c, -s], [s, c]])
+
+                P_shifted = P_shifted @ R.T
+                disp_norm = disp_norm @ R.T
+
+            # ----------------------------------------------------------
+            # 3E. SAVE SEGMENT
+            # ----------------------------------------------------------
+            all_segments.append({
                 'agent_id': agent_id,
-                'start_frame': frame_id[start_idx],
-                'coords_abs':segment_coords_abs.copy(),
-                'obs_coords_shifted': P_shifted[:obs_len],      # Input for GAT
-                'obs_displacement': P_displacement[:obs_len],   # Input for TCN
-                'pred_displacement_gt': P_displacement[obs_len:tot_len], # Ground Truth Target
-                'shift_value': P_obs                            # The (X_obs, Y_obs) used for shifting # this single value used for the shifting
+                'start_frame': frames[start],
+                'coords_abs': seg_abs.copy(),                      # scaled absolute
+                'obs_coords_shifted': P_shifted[:obs_len],         # [8,2]
+                'obs_displacement': disp_norm[:obs_len],           # [8,2] normalized
+                'pred_displacement_gt': disp_norm[obs_len:tot_len],# [12,2] normed
+                'shift_value': P_obs,                              # anchor for reconstruction
+                'global_scale': global_scale,
+                'displacement_scale': displacement_scale
             })
 
-
-  return all_segments
+    return all_segments
 
 
 
