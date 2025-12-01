@@ -1,5 +1,8 @@
 *./
 *.pdf
+*.csv
+*.txt
+
 
 # Python cache files
 __pycache__/
