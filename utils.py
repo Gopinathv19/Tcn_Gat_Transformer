@@ -1,8 +1,3 @@
-'''
-Utils script
-Author: Mengmeng Liu
-Date: 2022/09/24
-'''
 import torch
 import os
 import pickle
