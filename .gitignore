@@ -1,0 +1,13 @@
+*./
+*.pdf
+*.csv
+*.txt
+
+
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Model checkpoints and training data
+savedata/
